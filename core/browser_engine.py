@@ -20,7 +20,12 @@ class BrowserEngine:
         self._context = None
         self._page = None
         self.is_running = False
-        self._state_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "browser_state.json"))
+        # Data dir: where browser_user_data/, logs, and state files live.
+        # Defaults to the directory of this file; override with BROWSER_ENGINE_DATA_DIR
+        # so code and data can live in separate locations (e.g. when code is a git submodule).
+        self._data_dir = os.environ.get("BROWSER_ENGINE_DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+        self._project_root = os.environ.get("BROWSER_ENGINE_PROJECT_ROOT") or os.path.dirname(self._data_dir)
+        self._state_file = os.path.join(self._data_dir, "browser_state.json")
         self._sandbox_dir = None
         self._log_queue = []
         self._log_history = []
@@ -39,14 +44,14 @@ class BrowserEngine:
             "initial_user": None
         }
         # Per-image reject rate tracking
-        self._reject_log_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "reject_stat_log.json"))
+        self._reject_log_path = os.path.join(self._data_dir, "reject_stat_log.json")
         self._cycle_start_time = None   # float: time.time() at start of current cycle
         self._pending_refused = 0       # refused count waiting to be attributed to next successful image
         self._pending_resets = 0        # reset count waiting to be attributed to next successful image
         self._automation_needs_new_chat = True # Flag to force New Chat on next cycle
         self._session_lost = False      # Watchdog flag for engine_service to detect logout
         self._watchdog_task = None      # Handle for the background watchdog task
-        self._watchdog_log_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "watchdog.log"))
+        self._watchdog_log_path = os.path.join(self._data_dir, "watchdog.log")
         # Per-account session stats snapshot: captured when an account becomes active.
         # Stores {"successes": N, "refusals": N, "resets": N} so that per-account deltas
         # can be computed when that account is later switched away.
@@ -176,7 +181,7 @@ class BrowserEngine:
         await self.stop_registration()
         
         # 1. Prepare Sandbox
-        base_dir = os.path.abspath(os.path.dirname(__file__))
+        base_dir = self._data_dir
         source_user_data = os.path.join(base_dir, "browser_user_data")
         
         # Note: _cleanup_sandbox() sets self._sandbox_dir to None, so we must 
@@ -338,7 +343,7 @@ class BrowserEngine:
         # Close any previous registration browser first
         await self.stop_registration()
         
-        base_dir = os.path.abspath(os.path.dirname(__file__))
+        base_dir = self._data_dir
         user_data_dir = os.path.join(base_dir, "browser_user_data")
         
         self._reg_playwright = await async_playwright().start()
@@ -397,7 +402,7 @@ class BrowserEngine:
 
     def _log_debug(self, msg, event_type=None):
         """Helper to log debug info to engine.log and internal queue."""
-        LOG_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "engine.log"))
+        LOG_FILE = os.path.join(self._data_dir, "engine.log")
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         # Standardize prefix for the UI backend logs
         log_msg = f"{timestamp} API>> {msg}"
@@ -487,7 +492,7 @@ class BrowserEngine:
 
     def clear_physical_logs(self):
         """Truncates the engine.log file."""
-        LOG_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "engine.log"))
+        LOG_FILE = os.path.join(self._data_dir, "engine.log")
         try:
             import json
             entry = {
@@ -1021,7 +1026,7 @@ class BrowserEngine:
             from datetime import datetime
 
             # 1. Check if debug logging is enabled in config
-            config_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "config.json"))
+            config_path = os.path.join(self._project_root, "data", "config.json")
             if not os.path.exists(config_path):
                 return
             with open(config_path, "r", encoding="utf-8") as f:
@@ -1029,8 +1034,8 @@ class BrowserEngine:
             if not cfg.get("debug_logging_enabled", False):
                 return
 
-            engine_log_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "engine.log"))
-            debug_log_path  = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "debug.log"))
+            engine_log_path = os.path.join(self._data_dir, "engine.log")
+            debug_log_path  = os.path.join(self._project_root, "data", "debug.log")
             os.makedirs(os.path.dirname(debug_log_path), exist_ok=True)
 
             is_new_chat = (action_name == "new chat")

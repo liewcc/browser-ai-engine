@@ -77,7 +77,7 @@ class GeminiProvider(ProviderAdapter):
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
 
-        LOG_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "engine.log"))
+        LOG_FILE = os.path.join(self._e._data_dir, "engine.log")
 
         def log_debug(msg):
             timestamp = datetime.now().strftime("[%H:%M:%S]")
@@ -1814,7 +1814,7 @@ class GeminiProvider(ProviderAdapter):
             raise Exception("Browser Engine not started")
 
         # Mark the start of the new session logs (for debug_dump tracking)
-        engine_log_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "engine.log"))
+        engine_log_path = os.path.join(self._e._data_dir, "engine.log")
         if os.path.exists(engine_log_path):
             self._e._engine_log_last_pos = os.path.getsize(engine_log_path)
         else:
