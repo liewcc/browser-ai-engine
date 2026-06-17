@@ -11,7 +11,8 @@ from datetime import datetime
 
 
 def _default_log_path():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.log")
+    data_dir = os.environ.get("BROWSER_ENGINE_DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(data_dir, "engine.log")
 
 
 def _read_log_lines(log_path=None):
