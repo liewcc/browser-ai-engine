@@ -204,59 +204,99 @@ class GeminiProvider(ProviderAdapter):
     # ──────────────────────────────────────────────────────────────────────────
     async def discover_capabilities(self):
         """
-        Scans Gemini DOM to find available models and tools.
-        Updates config.json with discovery results.
+        Scans Gemini DOM to find available models, thinking levels, and tools.
+        All options are read dynamically from the live DOM — nothing is hardcoded.
+        Updates config.json with current selections only (not available options).
         """
         if not self._e.is_running:
             return {"status": "error", "message": "Browser not started"}
 
         self._log("Starting discovery scan...")
-        results = {"models": [], "tools": [], "current_model": "Unknown"}
+        results = {
+            "models": [],
+            "thinking_levels": [],
+            "current_model": "Unknown",
+            "current_thinking_level": None,
+            "main_tools": [],   # ordered list matching Gemini UI (includes "More uploads" / "More tools" markers)
+            "sub_tools": {},    # {"More uploads": [...], "More tools": [...]}
+            # legacy aliases kept for any callers that still read these
+            "tools": [],
+            "upload_tools": [],
+        }
 
         try:
-            # 1. Discover Models
-            # First, check current visible model
-            current_model_el = await self._page.query_selector('button[data-test-id="bard-mode-menu-button"] .logo-pill-label-container span')
+            # 1. Discover Models + Thinking Levels
+            # Read current model from pill header (.picker-primary-text confirmed in DOM)
+            current_model_el = await self._page.query_selector(
+                'button[data-test-id="bard-mode-menu-button"] .picker-primary-text'
+            )
             if current_model_el:
-                results["current_model"] = (await current_model_el.inner_text()).split('\n')[0].strip()
+                results["current_model"] = (await current_model_el.inner_text()).strip()
 
-            # Trigger model menu
+            # Open model menu
             await self._page.click('button[data-test-id="bard-mode-menu-button"]')
-            await asyncio.sleep(1.2)
+            # Wait until at least one model option is in the DOM
+            try:
+                await self._page.wait_for_selector(
+                    'gem-menu-item[data-test-id^="bard-mode-option-"]', timeout=5000
+                )
+            except Exception:
+                self._log("Model menu did not appear.")
 
-            # Extract models using precise selectors based on current Gemini DOM structure.
-            # Strategy:
-            #   1. Primary: target [data-test-id^="bard-mode-option-"] buttons — these are
-            #      the only real model-selection items and exclude the Upgrade container,
-            #      "Thinking level" picker, and the menu title row.
-            #   2. Extract text from .mode-title (e.g. "3.1 Flash-Lite") rather than the
-            #      full button innerText which would also include .mode-desc ("Fastest answers")
-            #      and icon text ("check_circle"), leading to stale/wrong entries like "Fast".
-            #   3. Fallback: if the primary selector yields nothing (Google redesign), fall
-            #      back to .bard-mode-list-button with the same .mode-title extraction.
+            await asyncio.sleep(0.5)
+
+            # Extract model names — text lives in span.label inside gem-menu-item-content
             results["models"] = await self._page.evaluate('''() => {
-                // Primary: data-test-id prefixed selectors are stable model-button identifiers
-                let items = Array.from(document.querySelectorAll('[data-test-id^="bard-mode-option-"]'));
-
-                // Fallback: class-based selector if data-test-id scheme changes
-                if (items.length === 0) {
-                    items = Array.from(document.querySelectorAll('button.bard-mode-list-button'));
-                }
-
-                return items.map(i => {
-                    // .mode-title contains only the clean model name, nothing else
-                    const titleEl = i.querySelector('.mode-title');
-                    return titleEl ? titleEl.innerText.trim() : i.innerText.split('\\n')[0].trim();
+                return Array.from(
+                    document.querySelectorAll('gem-menu-item[data-test-id^="bard-mode-option-"]')
+                ).map(item => {
+                    const label = item.querySelector('span.label');
+                    return label ? label.innerText.trim() : '';
                 }).filter(t => t.length > 0);
             }''')
+
+            # Read current thinking level from the "Thinking level" menu item sublabel
+            results["current_thinking_level"] = await self._page.evaluate('''() => {
+                const item = document.querySelector('gem-menu-item[value="thinking_level"]');
+                if (!item) return null;
+                const sub = item.querySelector('.sublabel');
+                return sub ? sub.innerText.trim() : null;
+            }''')
+
+            # Expand the "Thinking level" sub-menu via JS mouseenter (Playwright hover()
+            # fires mouseleave on the parent panel and collapses the whole menu)
+            expanded = await self._page.evaluate('''() => {
+                const item = document.querySelector('gem-menu-item[value="thinking_level"]');
+                if (!item) return false;
+                item.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
+                item.dispatchEvent(new MouseEvent('mouseover',  {bubbles: true}));
+                return true;
+            }''')
+
+            if expanded:
+                await asyncio.sleep(0.8)
+                # The sub-menu panel is a sibling div[popover] rendered after the thinking_level item
+                results["thinking_levels"] = await self._page.evaluate('''() => {
+                    const parent = document.querySelector('gem-menu-item[value="thinking_level"]');
+                    if (!parent) return [];
+                    let el = parent.nextElementSibling;
+                    while (el) {
+                        if (el.hasAttribute('popover') || el.classList.contains('cdk-overlay-popover')) {
+                            return Array.from(el.querySelectorAll('gem-menu-item span.label'))
+                                .map(s => s.innerText.trim())
+                                .filter(t => t.length > 0);
+                        }
+                        el = el.nextElementSibling;
+                    }
+                    return [];
+                }''')
 
             # Close menu
             await self._page.keyboard.press("Escape")
             await asyncio.sleep(0.5)
 
-            # 2. Discover Tools
-            # Primary selector: aria-label="Upload & tools" (the + button in current Gemini UI)
-            # Fallback chain: legacy class → text match
+            # 2. Discover Tools (in Gemini UI order)
+            # Order: upload items → [More uploads] → ai tools → [More tools]
             self._log("Attempting to open Tools drawer...")
             opened = False
             for locator in [
@@ -271,7 +311,6 @@ class GeminiProvider(ProviderAdapter):
                 except Exception:
                     pass
             if not opened:
-                # Last resort: find any button whose aria-label contains "tools" (case-insensitive)
                 await self._page.evaluate('''() => {
                     const btn = Array.from(document.querySelectorAll('button'))
                                      .find(b => (b.getAttribute("aria-label") || "").toLowerCase().includes("tools")
@@ -279,53 +318,112 @@ class GeminiProvider(ProviderAdapter):
                     if (btn) btn.click();
                 }''')
 
-            # Wait for toolbox-drawer-item anywhere in document (items render inside cdk-overlay)
             try:
                 await self._page.wait_for_selector('toolbox-drawer-item', timeout=5000)
             except Exception:
                 self._log("Tools drawer did not appear.")
+            await asyncio.sleep(0.5)
 
-            await asyncio.sleep(0.8)
+            main_tools: list = []
+            sub_tools: dict  = {}
 
-            # Grab tool labels — items live in cdk-overlay, so search the full document.
-            # toolbox-drawer-item uses .label.gem-menu-item-label; the Upload Files entry
-            # lives outside toolbox-drawer-item and uses .menu-text.gem-menu-item-label.
-            results["tools"] = await self._page.evaluate('''() => {
-                const labels = new Set();
+            # ── Step A: upload section base items (Upload files, Add from Drive) ──
+            # Photos/Notebooks use .gem-menu-item-label (no .menu-text), so use broad selector
+            _UPLOAD_LABEL_JS = '''Array.from(document.querySelectorAll(
+                    'mat-action-list button[role="menuitem"]'
+                )).map(btn => {
+                    const el = btn.querySelector('span.gem-menu-item-label')
+                             || btn.querySelector('.menu-text.gem-menu-item-label')
+                             || btn.querySelector('.menu-text')
+                             || btn.querySelector('.gem-menu-item-label')
+                             || btn.querySelector('.mdc-list-item__primary-text');
+                    return el ? el.innerText.split("\\n")[0].trim() : '';
+                }).filter(t => t.length > 0)'''
 
-                // 1. toolbox-drawer-item entries (Create image, Canvas, etc.)
-                document.querySelectorAll('toolbox-drawer-item').forEach(i => {
-                    const el = i.querySelector('.label.gem-menu-item-label')
-                            || i.querySelector('.label.gds-label-l')
-                            || i.querySelector('.mdc-list-item__primary-text');
-                    if (el) {
-                        const t = el.innerText.split('\\n')[0].trim();
-                        if (t) labels.add(t);
-                    }
-                });
+            upload_base: list = await self._page.evaluate(f'() => ({_UPLOAD_LABEL_JS})')
+            main_tools.extend(upload_base)
 
-                // 2. Upload Files and similar items that use .menu-text.gem-menu-item-label
-                document.querySelectorAll('.menu-text.gem-menu-item-label').forEach(el => {
-                    const t = el.innerText.split('\\n')[0].trim();
-                    if (t) labels.add(t);
-                });
-
-                return Array.from(labels);
+            # ── Step B: "More uploads" marker + sub-items (Photos, Notebooks) ──
+            # After clicking more-upload-button, Photos and Notebooks are added directly
+            # to the same mat-action-list — there is no separate .more-uploads-list container.
+            has_more_uploads = await self._page.evaluate('''() => {
+                const btn = document.querySelector('button.more-upload-button');
+                return !!(btn && btn.offsetParent !== null);
             }''')
+            if has_more_uploads:
+                main_tools.append("More uploads")
+                try:
+                    await self._page.click('button.more-upload-button')
+                    await asyncio.sleep(2.0)
+                    all_upload: list = await self._page.evaluate(f'() => ({_UPLOAD_LABEL_JS})')
+                    base_set = set(upload_base)
+                    sub_tools["More uploads"] = [t for t in all_upload if t not in base_set]
+                except Exception as exc:
+                    self._log(f"More-uploads sub-scan failed: {exc}")
 
-            # Close by clicking escape
+            # ── Step C: base AI tools (Create image, Canvas) — before expanding ──
+            ai_base: list = await self._page.evaluate('''() => {
+                return Array.from(document.querySelectorAll('toolbox-drawer-item'))
+                    .map(i => {
+                        const el = i.querySelector('.label.gem-menu-item-label')
+                                || i.querySelector('.label.gds-label-l')
+                                || i.querySelector('.mdc-list-item__primary-text');
+                        return el ? el.innerText.split('\\n')[0].trim() : '';
+                    }).filter(t => t.length > 0);
+            }''')
+            main_tools.extend(ai_base)
+
+            # ── Step D: "More tools" marker + sub-items (Create music, Guided learning) ──
+            has_more_tools = await self._page.evaluate('''() => {
+                const btn = document.querySelector('button.more-tools-button');
+                return !!(btn && btn.offsetParent !== null);
+            }''')
+            if has_more_tools:
+                main_tools.append("More tools")
+                try:
+                    await self._page.click('button.more-tools-button')
+                    await asyncio.sleep(0.5)
+                    ai_all: list = await self._page.evaluate('''() => {
+                        return Array.from(document.querySelectorAll('toolbox-drawer-item'))
+                            .map(i => {
+                                const el = i.querySelector('.label.gem-menu-item-label')
+                                        || i.querySelector('.label.gds-label-l')
+                                        || i.querySelector('.mdc-list-item__primary-text');
+                                return el ? el.innerText.split('\\n')[0].trim() : '';
+                            }).filter(t => t.length > 0);
+                    }''')
+                    ai_base_set = set(ai_base)
+                    sub_tools["More tools"] = [t for t in ai_all if t not in ai_base_set]
+                except Exception as exc:
+                    self._log(f"More-tools sub-scan failed: {exc}")
+
+            results["main_tools"]   = main_tools
+            results["sub_tools"]    = sub_tools
+            # legacy aliases
+            results["tools"]        = ai_base
+            results["upload_tools"] = upload_base
+
+            # Close drawer
+            await self._page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
             await self._page.keyboard.press("Escape")
 
-            # Persist to config.json using standard utility
+            # Only persist current selections — available options are always live-scanned
             try:
                 save_config({
                     "discovery": {
                         "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "available_models": results["models"],
-                        "available_tools": results["tools"]
+                        "current_model": results["current_model"],
+                        "current_thinking_level": results["current_thinking_level"],
                     }
                 })
-                self._log(f"Discovery results saved. Models: {len(results['models'])}, Tools: {len(results['tools'])}")
+                self._log(
+                    f"Discovery complete. "
+                    f"Models: {results['models']}, "
+                    f"Thinking: {results['thinking_levels']}, "
+                    f"Main tools ({len(results['main_tools'])}): {results['main_tools']}, "
+                    f"Sub-menus: {results['sub_tools']}"
+                )
             except Exception as e:
                 self._log(f"Failed to save discovery: {e}")
 
@@ -338,65 +436,180 @@ class GeminiProvider(ProviderAdapter):
     # ──────────────────────────────────────────────────────────────────────────
     # apply_settings
     # ──────────────────────────────────────────────────────────────────────────
-    async def apply_settings(self, model_name=None, tool_name=None):
-        """
-        Automates switching to the specified model and/or tool.
-        """
+    async def apply_settings(self, model_name=None, tool_name=None, thinking_level=None):
+        """Applies model, thinking level, and/or tool to the Gemini UI."""
         if not self._e.is_running:
             return {"status": "error", "message": "Browser not started"}
 
+        applied = []
         try:
             # 1. Apply Model
             if model_name:
                 self._log(f"Applying model: {model_name}")
                 await self._page.click('button[data-test-id="bard-mode-menu-button"]')
                 await asyncio.sleep(0.8)
-
-                await self._page.evaluate(f'''(name) => {{
-                    const items = Array.from(document.querySelectorAll('.mat-mdc-menu-item, [role="menuitem"]'));
-                    const target = items.find(i => {{
-                        const raw = i.innerText.split('\\n')[0].trim().toLowerCase();
+                clicked = await self._page.evaluate('''(name) => {
+                    const items = Array.from(document.querySelectorAll(
+                        'gem-menu-item[data-test-id^="bard-mode-option-"]'
+                    ));
+                    const target = items.find(i => {
+                        const raw = (i.querySelector("span.label") || i).innerText
+                                        .split("\\n")[0].trim().toLowerCase();
                         return raw.startsWith(name.toLowerCase()) || name.toLowerCase().startsWith(raw);
-                    }});
-                    if (target) target.click();
-                }}''', model_name)
+                    });
+                    if (target) { target.click(); return true; }
+                    return false;
+                }''', model_name)
                 await asyncio.sleep(1.5)
+                applied.append(f"model={'ok' if clicked else 'not found'}")
 
-            # 2. Apply Tool
+            # 2. Apply Thinking Level (requires model menu to be open — re-open after model click)
+            if thinking_level:
+                self._log(f"Applying thinking level: {thinking_level}")
+                await self._page.click('button[data-test-id="bard-mode-menu-button"]')
+                await asyncio.sleep(0.8)
+
+                # Trigger sub-menu via JS mouseenter (Playwright hover() collapses the menu)
+                expanded = await self._page.evaluate('''() => {
+                    const item = document.querySelector('gem-menu-item[value="thinking_level"]');
+                    if (!item) return false;
+                    item.dispatchEvent(new MouseEvent("mouseenter", {bubbles: true}));
+                    item.dispatchEvent(new MouseEvent("mouseover",  {bubbles: true}));
+                    return true;
+                }''')
+
+                if expanded:
+                    await asyncio.sleep(0.8)
+                    clicked = await self._page.evaluate('''(level) => {
+                        const parent = document.querySelector('gem-menu-item[value="thinking_level"]');
+                        if (!parent) return false;
+                        let el = parent.nextElementSibling;
+                        while (el) {
+                            if (el.hasAttribute("popover") || el.classList.contains("cdk-overlay-popover")) {
+                                const items = Array.from(el.querySelectorAll("gem-menu-item"));
+                                const target = items.find(i => {
+                                    const lbl = i.querySelector("span.label");
+                                    return lbl && lbl.innerText.trim().toLowerCase() === level.toLowerCase();
+                                });
+                                if (target) { target.click(); return true; }
+                                return false;
+                            }
+                            el = el.nextElementSibling;
+                        }
+                        return false;
+                    }''', thinking_level)
+                    await asyncio.sleep(1.0)
+                    applied.append(f"thinking={'ok' if clicked else 'not found'}")
+                else:
+                    applied.append("thinking=no submenu item")
+
+                await self._page.keyboard.press("Escape")
+                await asyncio.sleep(1.0)
+
+            # 3. Apply Tool
             if tool_name:
                 self._log(f"Applying tool: {tool_name}")
-                if tool_name.lower() == "default":
-                    pass
-                else:
-                    # Open Tools drawer
-                    btn = self._page.locator('button.toolbox-drawer-button').first
-                    if await btn.is_visible():
-                        await btn.click()
-                    else:
-                        await self._page.evaluate('''() => {
-                            const btn = Array.from(document.querySelectorAll('button'))
-                                             .find(b => b.innerText.includes("Tools"));
-                            if (btn) btn.click();
-                        }''')
+                # Open Tools drawer
+                opened_drawer = False
+                for sel in ['button[aria-label="Upload & tools"]', 'button.toolbox-drawer-button']:
+                    try:
+                        loc = self._page.locator(sel).first
+                        if await loc.is_visible(timeout=1500):
+                            await loc.click()
+                            self._log(f"Toolbox drawer opened via: {sel}")
+                            opened_drawer = True
+                            break
+                    except Exception:
+                        pass
+                if not opened_drawer:
+                    self._log("Toolbox drawer button not found — trying JS fallback")
+                    await self._page.evaluate('''() => {
+                        const b = Array.from(document.querySelectorAll("button"))
+                                       .find(b => b.getAttribute("aria-label") === "Upload & tools"
+                                               || b.classList.contains("toolbox-drawer-button"));
+                        if (b) b.click();
+                    }''')
+                await asyncio.sleep(1.0)
+                drawer_opened = False
+                try:
+                    await self._page.wait_for_selector(
+                        'mat-action-list button[role="menuitem"]',
+                        state='visible', timeout=5000
+                    )
+                    await asyncio.sleep(0.5)
+                    drawer_opened = True
+                    self._log(f"Tool drawer open (upload buttons visible), looking for: {tool_name}")
+                except Exception:
+                    self._log("Upload buttons not visible after drawer open attempt")
 
-                    await asyncio.sleep(1.0)
-
-                    await self._page.evaluate(f'''(name) => {{
-                        const menu = document.getElementById('toolbox-drawer-menu');
-                        if (!menu) return;
-                        const items = Array.from(menu.querySelectorAll('toolbox-drawer-item'));
-                        const target = items.find(i => {{
-                            const label = i.querySelector('.label.gds-label-l') || i.querySelector('.mdc-list-item__primary-text');
-                            return label && label.innerText.toLowerCase().includes(name.toLowerCase());
+                def _js_match_upload(name: str) -> str:
+                    # Photos uses .menu-text.gem-menu-item-label; Notebooks uses .gem-menu-item-label only
+                    return f'''(name) => {{
+                        const btns = Array.from(document.querySelectorAll(
+                            'mat-action-list button[role="menuitem"]'
+                        ));
+                        const target = btns.find(b => {{
+                            const el = b.querySelector("span.gem-menu-item-label")
+                                    || b.querySelector(".menu-text.gem-menu-item-label")
+                                    || b.querySelector(".menu-text")
+                                    || b.querySelector(".gem-menu-item-label")
+                                    || b.querySelector(".mdc-list-item__primary-text");
+                            const txt = el ? el.innerText.split("\\n")[0].trim() : b.innerText.split("\\n")[0].trim();
+                            return txt.toLowerCase() === name.toLowerCase();
                         }});
-                        if (target) {{
-                            const btn = target.querySelector('button');
-                            if (btn) btn.click();
-                        }}
-                    }}''', tool_name)
-                    await asyncio.sleep(1.0)
+                        if (target) {{ target.click(); return true; }}
+                        return false;
+                    }}'''
 
-            return {"status": "success"}
+                def _js_match_ai(name: str) -> str:
+                    return f'''(name) => {{
+                        const menu = document.getElementById("toolbox-drawer-menu");
+                        if (!menu) return false;
+                        const items = Array.from(menu.querySelectorAll("toolbox-drawer-item"));
+                        const target = items.find(i => {{
+                            const lbl = i.querySelector(".label.gds-label-l, .label.gem-menu-item-label, .mdc-list-item__primary-text");
+                            return lbl && lbl.innerText.toLowerCase().includes(name.toLowerCase());
+                        }});
+                        if (target) {{ const b = target.querySelector("button"); if (b) b.click(); return !!b; }}
+                        return false;
+                    }}'''
+
+                # Pass 1: visible upload items (Upload files, Add from Drive)
+                clicked = await self._page.evaluate(_js_match_upload(tool_name), tool_name)
+
+                if not clicked:
+                    self._log(f"Pass 1 (upload base) miss for '{tool_name}' — trying more-upload expansion")
+                    # Pass 2: expand "More uploads" then retry (Photos, Notebooks)
+                    more_up = self._page.locator('button.more-upload-button').first
+                    if await more_up.is_visible(timeout=2000):
+                        await more_up.click()
+                        self._log("More uploads expanded, waiting for sub-items...")
+                        await asyncio.sleep(1.5)
+                        clicked = await self._page.evaluate(_js_match_upload(tool_name), tool_name)
+                        if not clicked:
+                            await self._page.keyboard.press("Escape")
+                            await asyncio.sleep(0.3)
+
+                if not clicked:
+                    # Pass 3: visible AI tools (Create image, Canvas)
+                    clicked = await self._page.evaluate(_js_match_ai(tool_name), tool_name)
+
+                if not clicked:
+                    self._log(f"Pass 3 (ai base) miss for '{tool_name}' — trying more-tools expansion")
+                    # Pass 4: expand "More tools" then retry (Create music, Guided learning)
+                    more_tools = self._page.locator('button.more-tools-button').first
+                    if await more_tools.is_visible(timeout=1000):
+                        await more_tools.click()
+                        await asyncio.sleep(0.5)
+                        clicked = await self._page.evaluate(_js_match_ai(tool_name), tool_name)
+
+                await asyncio.sleep(1.0)
+                self._log(f"Tool click result: {'ok' if clicked else 'not found'} for '{tool_name}'")
+                applied.append(f"tool={'ok' if clicked else 'not found'}")
+
+            summary = ", ".join(applied) if applied else "nothing to apply"
+            self._log(f"apply_settings done: {summary}")
+            return {"status": "success", "message": summary}
         except Exception as e:
             self._log(f"Apply settings failed: {e}")
             return {"status": "error", "message": str(e)}

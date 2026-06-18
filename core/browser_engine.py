@@ -573,8 +573,8 @@ class BrowserEngine:
     async def discover_capabilities(self):
         return await self._provider.discover_capabilities()
 
-    async def apply_settings(self, model_name=None, tool_name=None):
-        return await self._provider.apply_settings(model_name, tool_name)
+    async def apply_settings(self, model_name=None, tool_name=None, thinking_level=None):
+        return await self._provider.apply_settings(model_name, tool_name, thinking_level)
 
     async def clear_attachments(self):
         return await self._provider.clear_attachments()
