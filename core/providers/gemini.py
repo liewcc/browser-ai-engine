@@ -354,7 +354,7 @@ class GeminiProvider(ProviderAdapter):
                 main_tools.append("More uploads")
                 try:
                     await self._page.click('button.more-upload-button')
-                    await asyncio.sleep(1.2)
+                    await asyncio.sleep(2.0)
                     all_upload: list = await self._page.evaluate(f'() => ({_UPLOAD_LABEL_JS})')
                     base_set = set(upload_base)
                     sub_tools["More uploads"] = [t for t in all_upload if t not in base_set]
@@ -581,9 +581,10 @@ class GeminiProvider(ProviderAdapter):
                     self._log(f"Pass 1 (upload base) miss for '{tool_name}' — trying more-upload expansion")
                     # Pass 2: expand "More uploads" then retry (Photos, Notebooks)
                     more_up = self._page.locator('button.more-upload-button').first
-                    if await more_up.is_visible(timeout=1000):
+                    if await more_up.is_visible(timeout=2000):
                         await more_up.click()
-                        await asyncio.sleep(0.5)
+                        self._log("More uploads expanded, waiting for sub-items...")
+                        await asyncio.sleep(1.5)
                         clicked = await self._page.evaluate(_js_match_upload(tool_name), tool_name)
                         if not clicked:
                             await self._page.keyboard.press("Escape")
