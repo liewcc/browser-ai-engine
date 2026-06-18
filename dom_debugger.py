@@ -57,10 +57,14 @@ async def _wait_ready(url: str, timeout: int = 40) -> bool:
 
 
 async def _start_engine(port: int) -> subprocess.Popen:
+    # DATA_DIR must point to the *project* core (where browser_user_data/ and
+    # browser_session_sandbox/ live), not the engine submodule's core.
+    # This mirrors how tui/app.py sets BROWSER_ENGINE_DATA_DIR = ROOT/core.
+    _project_core = os.path.join(_PROJECT_ROOT, "core")
     env = {
         **os.environ,
         "BROWSER_ENGINE_PROJECT_ROOT": _PROJECT_ROOT,
-        "BROWSER_ENGINE_DATA_DIR":     _CORE_DIR,
+        "BROWSER_ENGINE_DATA_DIR":     _project_core,
     }
     proc = subprocess.Popen(
         [sys.executable, "-u", "engine_service.py"],
@@ -112,32 +116,44 @@ async def main(port: int) -> None:
     except Exception as e:
         print(f"Browser start note: {e}")
 
+    import keyboard
+
     print()
     print("─" * 58)
     print("  HOW TO USE")
     print("  • Move mouse anywhere in the Gemini browser window")
-    print("  • Press Enter → DOM saved (hover menus stay open!)")
+    print("  • Press F9 (global hotkey) → DOM captured instantly")
+    print("    (works from any window, menus stay open!)")
     print("  • Tell Claude: 'analyze the latest capture'")
-    print("  • Follow Claude's instructions, press Enter again")
-    print("  • Ctrl+C to exit")
+    print("  • Follow Claude's instructions, press F9 again")
+    print("  • Ctrl+C in THIS window to exit")
     print("─" * 58)
     print()
+    print("Waiting for F9 …")
 
     count = 0
-    while True:
-        try:
-            input(f"[#{count + 1}]  Position mouse → press Enter to capture: ")
-        except (KeyboardInterrupt, EOFError):
-            print("\nExiting debug session.")
-            break
+    captured = asyncio.Event()
+    loop = asyncio.get_event_loop()
 
-        try:
-            path = await _capture(url)
-            count += 1
-            print(f"  ✓  #{count} saved → {path}")
-            print("     Tell Claude to analyze it.\n")
-        except Exception as e:
-            print(f"  ✗  Capture failed: {e}\n")
+    def _on_f9():
+        loop.call_soon_threadsafe(captured.set)
+
+    keyboard.add_hotkey("f9", _on_f9)
+    try:
+        while True:
+            await captured.wait()
+            captured.clear()
+            try:
+                path = await _capture(url)
+                count += 1
+                print(f"  ✓  #{count} saved → {path}")
+                print("     Tell Claude to analyze it.\n")
+            except Exception as e:
+                print(f"  ✗  Capture failed: {e}\n")
+    except KeyboardInterrupt:
+        print("\nExiting debug session.")
+    finally:
+        keyboard.remove_hotkey("f9")
 
     # ── Cleanup ──────────────────────────────────────────────
     if engine_proc:

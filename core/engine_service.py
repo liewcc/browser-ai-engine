@@ -575,11 +575,20 @@ async def perform_switch_logic(h: bool = None, direction: int = 1, target_userna
                 current_id_headed = acc_info_headed.get("account_id")
                 
                 if not is_logged_in_headed or not check_match(current_id_headed, target_user['username']):
-                    # Fallback failed
-                    err_msg = f"Headed fallback login failed or account mismatch. Expected: {target_user['username']}, Got: {current_id_headed}"
-                    print(f"[ENGINE] {err_msg}")
-                    await engine.stop()
-                    return {"status": "error", "message": err_msg}
+                    headed_status = acc_info_headed.get("status", "unknown")
+                    if headed_status == "not_logged_in":
+                        err_msg = f"Headed fallback login failed. Expected: {target_user['username']}, Got: {current_id_headed}"
+                        print(f"[ENGINE] {err_msg}")
+                        await engine.stop()
+                        return {"status": "error", "message": err_msg}
+                    elif headed_status == "unknown":
+                        # Cannot confirm but not definitively signed out — proceed
+                        print(f"[ENGINE] Headed fallback: account detection unclear; proceeding anyway.")
+                    else:
+                        err_msg = f"Headed fallback account mismatch. Expected: {target_user['username']}, Got: {current_id_headed}"
+                        print(f"[ENGINE] {err_msg}")
+                        await engine.stop()
+                        return {"status": "error", "message": err_msg}
                 else:
                     # Fallback succeeded, back to headless
                     print(f"[ENGINE] Headed fallback succeeded for {target_user['username']}. Returning to headless...")
@@ -589,10 +598,21 @@ async def perform_switch_logic(h: bool = None, direction: int = 1, target_userna
                     await engine.navigate(target_url)
                     await asyncio.sleep(3.0)
             else:
-                # Already headed, but failed
-                err_msg = f"Login failed or account mismatch. Expected: {target_user['username']}, Got: {current_id}"
-                print(f"[ENGINE] {err_msg}")
-                return {"status": "error", "message": err_msg}
+                # Already headed, but check failed
+                acct_status = acc_info.get("status", "unknown")
+                if acct_status == "not_logged_in":
+                    # Definitively not logged in (sign-in button visible)
+                    err_msg = f"Login failed. Expected: {target_user['username']}, Got: {current_id}"
+                    print(f"[ENGINE] {err_msg}")
+                    return {"status": "error", "message": err_msg}
+                elif acct_status == "unknown":
+                    # Page loaded but selectors inconclusive — headed mode, user can see browser
+                    print(f"[ENGINE] Account detection unclear (status=unknown) in headed mode; proceeding.")
+                else:
+                    # logged_in=True but email mismatch
+                    err_msg = f"Account mismatch. Expected: {target_user['username']}, Got: {current_id}"
+                    print(f"[ENGINE] {err_msg}")
+                    return {"status": "error", "message": err_msg}
                 
     except Exception as e:
         print(f"[ENGINE] Error during login check: {e}")
@@ -1561,13 +1581,18 @@ async def discover_capabilities():
 class SettingsRequest(BaseModel):
     model: str = None
     tool: str = None
+    thinking_level: str = None
 
 @app.post("/browser/apply_settings")
 async def apply_settings(req: SettingsRequest):
     if not engine.is_running:
         raise HTTPException(status_code=400, detail="Engine not running")
     try:
-        result = await engine.apply_settings(model_name=req.model, tool_name=req.tool)
+        result = await engine.apply_settings(
+            model_name=req.model,
+            tool_name=req.tool,
+            thinking_level=req.thinking_level,
+        )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

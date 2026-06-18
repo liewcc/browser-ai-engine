@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python debug_dom.py
+python dom_debugger.py
 pause
