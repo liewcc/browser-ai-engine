@@ -71,6 +71,10 @@ class NavigateRequest(BaseModel):
 class PromptRequest(BaseModel):
     text: str | None = None
 
+class ChatRequest(BaseModel):
+    text: str
+    new_conversation: bool = True
+
 class PersonaRequest(BaseModel):
     headless: bool | None = None
 
@@ -1636,14 +1640,14 @@ async def submit_response(req: PromptRequest | None = None):
 
 
 @app.post("/browser/chat")
-async def send_chat(req: PromptRequest):
+async def send_chat(req: ChatRequest):
     if not engine.is_running:
         raise HTTPException(status_code=400, detail="Engine not running")
     if engine.automation_status.get("is_running"):
         raise HTTPException(status_code=409, detail="Automation is running; stop it before using chat.")
     try:
         engine._stop_automation_event.clear()
-        result = await engine.send_chat(req.text)
+        result = await engine.send_chat(req.text, new_conversation=req.new_conversation)
         return result
     except HTTPException:
         raise
