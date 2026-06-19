@@ -946,7 +946,10 @@ class BrowserEngine:
                         if status == "error" and "quota" in str(resp.get("message", "")).lower():
                             self._log_debug("QUOTA EXCEEDED.")
                             await self.stop()
-                            self.automation_status["is_running"] = False
+                            # NOTE: do NOT set automation_status["is_running"] = False here.
+                            # automation_manager is still alive doing account-switching; setting
+                            # is_running=False while the browser restarts creates a race where
+                            # the UI's auto-continue fires and spawns a second manager.
                             self._automation_needs_new_chat = True
                             return {"status": "quota", "message": "Quota reached."}
                         else:
