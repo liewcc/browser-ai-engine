@@ -75,6 +75,11 @@ class ChatRequest(BaseModel):
     text: str
     new_conversation: bool = True
 
+
+class SwitchServiceRequest(BaseModel):
+    service: str
+
+
 class PersonaRequest(BaseModel):
     headless: bool | None = None
 
@@ -1824,6 +1829,12 @@ async def new_chat():
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/browser/switch_service")
+async def switch_service(req: SwitchServiceRequest):
+    result = await engine.switch_provider(req.service)
+    return result
+
 
 @app.post("/browser/download")
 async def download_images(req: DownloadRequest):

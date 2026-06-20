@@ -8,12 +8,19 @@ from config_utils import load_config, save_config
 from playwright.async_api import async_playwright
 from datetime import datetime
 from providers.gemini import GeminiProvider
+from providers.deepseek import DeepSeekProvider
+
 
 # Fix for Windows asyncio NotImplementedError with subprocesses
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 class BrowserEngine:
+    _PROVIDER_REGISTRY = {
+        "gemini": GeminiProvider,
+        "deepseek": DeepSeekProvider,
+    }
+
     def __init__(self):
         self._playwright = None
         self._browser = None
@@ -63,7 +70,9 @@ class BrowserEngine:
         # Last image src seen before submit (used by submit_response for change detection)
         self._last_seen_src = None
         # Gemini provider delegate
+        self._active_service = "gemini"
         self._provider = GeminiProvider(self)
+
 
 
 
@@ -634,6 +643,26 @@ class BrowserEngine:
 
     async def new_chat(self, target_url: str = None):
         return await self._provider.new_chat(target_url)
+
+    async def switch_provider(self, service_name: str) -> dict:
+        """Switch the active provider. Navigates to the new service's URL."""
+        name = service_name.lower().strip()
+        cls = self._PROVIDER_REGISTRY.get(name)
+        if cls is None:
+            available = list(self._PROVIDER_REGISTRY.keys())
+            return {"status": "error", "message": f"Unknown service '{name}'. Available: {available}"}
+        if name == self._active_service:
+            return {"status": "success", "message": f"Already using {name}"}
+        new_provider = cls(self)
+        try:
+            if self._page and not self._page.is_closed():
+                await self._page.goto(cls.BASE_URL, wait_until="domcontentloaded", timeout=15000)
+        except Exception as e:
+            self._log_debug(f"switch_provider: navigation warning: {e}")
+        self._provider = new_provider
+        self._active_service = name
+        return {"status": "success", "message": f"Switched to {name}"}
+
 
     async def delete_activity_history(self, range_name: str = "Last hour"):
         return await self._provider.delete_activity_history(range_name)
