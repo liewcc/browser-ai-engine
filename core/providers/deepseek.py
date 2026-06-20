@@ -12,7 +12,10 @@ class DeepSeekProvider(ProviderAdapter):
         super().__init__(engine)
 
     async def new_chat(self, target_url: str = None):
-        """Navigate to DeepSeek chat web UI and wait for input area to be ready."""
+        """Navigate to DeepSeek and wait for the chat input to be ready.
+        If the page needs human interaction (verification or login), ensures
+        a headed browser is open and returns login_required status.
+        """
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
         # ponytail: ignore target_url — it comes from config.json which holds a Gemini URL
@@ -20,26 +23,51 @@ class DeepSeekProvider(ProviderAdapter):
         self._log(f"DeepSeek: Navigating to {url}...")
         await self._e.navigate(url)
 
-        # Wait for input ready (selector: textarea[placeholder='Message DeepSeek'])
+        # Wait for the chat input — its presence means the page is fully ready
+        input_ready = False
         try:
             await self._page.wait_for_selector(
                 "textarea[placeholder='Message DeepSeek']",
                 state="visible",
                 timeout=15000
             )
+            input_ready = True
             self._log("DeepSeek: Chat input ready.")
         except Exception as e:
-            self._log(f"DeepSeek: Warning - Input element not found or not visible: {e}")
+            self._log(f"DeepSeek: Chat input not visible — page needs human interaction: {e}")
 
         await self.dismiss_agreement_popups()
-        login_state = await self._check_login()
-        if not login_state.get("logged_in"):
-            self._log("DeepSeek: Not logged in — human action required.")
+
+        if not input_ready:
+            # Page requires human attention (verification challenge, login, etc.)
+            # Ensure the browser is visible so the user can interact
+            if getattr(self._e, 'last_headless', True):
+                self._log("DeepSeek: Switching to headed browser for user interaction.")
+                profile = getattr(self._e, '_last_profile_name', 'Default')
+                await self._e.stop()
+                await self._e.start(headless=False, url=url, profile_name=profile)
+                await self._e.navigate(url)
+                try:
+                    cdp = await self._page.context.new_cdp_session(self._page)
+                    win_id = (await cdp.send("Browser.getWindowForTarget"))["windowId"]
+                    await cdp.send("Browser.setWindowBounds", {
+                        "windowId": win_id,
+                        "bounds": {"windowState": "normal"}
+                    })
+                    await cdp.detach()
+                except Exception as e:
+                    self._log(f"DeepSeek: Could not restore window (non-fatal): {e}")
             return {
                 "status": "login_required",
-                "message": "DeepSeek is not logged in. Please log in manually in the browser window, then call new_chat() again."
+                "message": "DeepSeek requires your attention (verification or login). Please interact with the browser window, then call new_chat() again."
             }
-        self._log(f"DeepSeek: Logged in as '{login_state.get('username', 'unknown')}'.")
+
+        # Page is ready — log account info if available
+        login_state = await self._check_login()
+        if login_state.get("logged_in"):
+            self._log(f"DeepSeek: Logged in as '{login_state.get('username', 'unknown')}'.")
+        else:
+            self._log("DeepSeek: Chat ready (account info not visible).")
         return {"status": "success"}
 
     async def send_chat(self, prompt: str, **kwargs) -> dict:
