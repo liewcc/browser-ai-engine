@@ -1439,6 +1439,26 @@ class GeminiProvider(ProviderAdapter):
         return {"status": "timeout", "message": "Timed out waiting for text response."}
 
     # ──────────────────────────────────────────────────────────────────────────
+    # get_last_response
+    # ──────────────────────────────────────────────────────────────────────────
+    async def get_last_response(self) -> dict:
+        """Read the current text of the last model-response element in the DOM.
+        Returns partial text if Gemini is still generating; empty string if none found."""
+        try:
+            text = await self._page.evaluate("""
+                () => {
+                    const els = document.querySelectorAll('model-response');
+                    if (!els.length) return '';
+                    const last = els[els.length - 1];
+                    return last.innerText || last.textContent || '';
+                }
+            """)
+            still_generating = await self._page.is_visible('button[aria-label="Stop response"]')
+            return {"text": text.strip(), "done": not still_generating}
+        except Exception as e:
+            return {"text": "", "done": False, "error": str(e)}
+
+    # ──────────────────────────────────────────────────────────────────────────
     # redo_response
     # ──────────────────────────────────────────────────────────────────────────
     async def redo_response(self):

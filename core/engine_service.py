@@ -1654,6 +1654,16 @@ async def send_chat(req: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/browser/last_response")
+async def get_last_response():
+    if not engine.is_running:
+        raise HTTPException(status_code=400, detail="Engine not running")
+    try:
+        result = await engine.get_last_response()
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/engine/profiles")
 async def get_profiles():
     from config_utils import load_login_lookup

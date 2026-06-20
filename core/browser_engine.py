@@ -620,6 +620,9 @@ class BrowserEngine:
     async def send_chat(self, prompt: str, new_conversation: bool = True) -> dict:
         return await self._provider.send_chat(prompt, new_conversation=new_conversation)
 
+    async def get_last_response(self) -> dict:
+        return await self._provider.get_last_response()
+
     async def redo_response(self):
         return await self._provider.redo_response()
 
