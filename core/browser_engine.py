@@ -66,7 +66,6 @@ class BrowserEngine:
         # Registration browser handles (separate from main browser)
         self._reg_playwright = None
         self._reg_context = None
-        self._engine_log_last_pos = None
         # Last image src seen before submit (used by submit_response for change detection)
         self._last_seen_src = None
         # Gemini provider delegate
@@ -623,31 +622,7 @@ class BrowserEngine:
     async def dismiss_agreement_popups(self):
         return await self._provider.dismiss_agreement_popups()
 
-    async def get_screenshot(self, output_path=None):
-        """Captures a screenshot with reference-aligned stability."""
-        if not self.is_running:
-            raise Exception("Browser Engine not started")
-        
-        # Stability waits
-        await self._page.wait_for_load_state("load")
-        await self._page.wait_for_timeout(2000) 
-        
-        # Fix for white screen: ensure body is present and visible
-        try:
-            body_visible = await self._page.is_visible("body")
-            if not body_visible:
-                await self._page.wait_for_selector("body", state="visible", timeout=10000)
-        except Exception:
-            pass
-        
-        if not output_path:
-            out_dir = "browser_screen_capture"
-            output_path = f"{out_dir}/screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            os.makedirs(out_dir, exist_ok=True)
-            
-        # Using full_page=True as seen in reference check_signin.py
-        await self._page.screenshot(path=output_path, full_page=True)
-        return output_path
+
 
     async def get_gem_title(self) -> dict:
         return await self._provider.get_gem_title()
@@ -1144,110 +1119,4 @@ class BrowserEngine:
 
     async def get_account_info(self):
         return await self._provider.get_account_info()
-
-    async def debug_dump(self, action_name):
-        """Dumps a window of engine.log + current page HTML into data/debug.log.
-
-        Each call captures only the engine.log lines written SINCE the previous
-        debug_dump call, so every section in debug.log corresponds exactly to
-        what the engine was doing during that action (new chat / submit / redo).
-
-        On 'new chat': overwrites debug.log (new session) and resets the read
-        position to the current end of engine.log, so only future entries are
-        captured.
-        """
-        try:
-            import os
-            import json
-            from datetime import datetime
-
-            # 1. Check if debug logging is enabled in config
-            config_path = os.path.join(self._project_root, "data", "config.json")
-            if not os.path.exists(config_path):
-                return
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            if not cfg.get("debug_logging_enabled", False):
-                return
-
-            engine_log_path = os.path.join(self._data_dir, "engine.log")
-            debug_log_path  = os.path.join(self._project_root, "data", "debug.log")
-            os.makedirs(os.path.dirname(debug_log_path), exist_ok=True)
-
-            is_new_chat = (action_name == "new chat")
-            write_mode  = "w" if is_new_chat else "a"
-
-            # 2. Read ONLY the new engine.log lines since the last dump.
-            #    _engine_log_last_pos tracks the byte offset after the previous read.
-            if is_new_chat:
-                # On new chat: read logs generated since self._engine_log_last_pos was set in new_chat()
-                last_pos = getattr(self, '_engine_log_last_pos', None)
-                if last_pos is None:
-                    if os.path.exists(engine_log_path):
-                        last_pos = os.path.getsize(engine_log_path)
-                    else:
-                        last_pos = 0
-                new_log_lines = ""
-                if os.path.exists(engine_log_path):
-                    try:
-                        with open(engine_log_path, "r", encoding="utf-8", errors="replace") as lf:
-                            lf.seek(last_pos)
-                            new_log_lines = lf.read()
-                            self._engine_log_last_pos = lf.tell()
-                    except Exception as le:
-                        new_log_lines = f"Error reading engine log: {le}"
-
-            else:
-                last_pos = getattr(self, '_engine_log_last_pos', 0)
-                new_log_lines = ""
-                if os.path.exists(engine_log_path):
-                    try:
-                        with open(engine_log_path, "r", encoding="utf-8", errors="replace") as lf:
-                            lf.seek(last_pos)
-                            new_log_lines = lf.read()
-                            self._engine_log_last_pos = lf.tell()
-                    except Exception as le:
-                        new_log_lines = f"Error reading engine log: {le}"
-
-            # 3. Get the page HTML
-            page_content = ""
-            if self._page:
-                try:
-                    page_content = await self._page.content()
-                except Exception as pe:
-                    page_content = f"Error retrieving page content: {pe}"
-            else:
-                page_content = "Browser not started or page not available."
-
-            # 4. Write to debug.log
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            header = (
-                "\n" + "="*80 +
-                f"\nDEBUG DUMP: Action '{action_name}' at {timestamp}\n" +
-                "="*80 + "\n"
-            )
-
-            with open(debug_log_path, write_mode, encoding="utf-8") as df:
-                df.write(header)
-                if new_log_lines:
-                    df.write("--- ENGINE LOG (this action) ---\n")
-                    df.write(new_log_lines)
-                    df.write("\n")
-                df.write(f"--- BROWSER PAGE HTML ({action_name}) ---\n")
-                df.write(page_content)
-                df.write("\n")
-
-            self._log_debug(f"Debug logging: Dumped DOM and logs for '{action_name}' to data/debug.log (mode={write_mode})")
-        except Exception as e:
-            if hasattr(self, '_log_debug'):
-                self._log_debug(f"Debug logging failed: {e}")
-
-
-
-    async def test_connection(self):
-        return await self._provider.test_connection()
-
-if __name__ == "__main__":
-    # Test script
-    engine = BrowserEngine()
-    asyncio.run(engine.test_connection())
+

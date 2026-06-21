@@ -307,17 +307,7 @@ class DeepSeekProvider(ProviderAdapter):
         except Exception as e:
             return {"text": "", "done": False, "error": str(e)}
 
-    async def test_connection(self):
-        """Navigate to BASE_URL, return success or error."""
-        if not self._e.is_running:
-            return {"status": "error", "message": "Browser Engine not started"}
-        try:
-            self._log(f"DeepSeek: Testing connection to {self.BASE_URL}...")
-            await self._e.navigate(self.BASE_URL)
-            return {"status": "success"}
-        except Exception as e:
-            self._log(f"DeepSeek: Connection test failed: {e}")
-            return {"status": "error", "message": str(e)}
+
 
     async def attach_files(self, file_paths: list) -> dict:
         """Attach files to the current DeepSeek prompt using the hidden file input."""

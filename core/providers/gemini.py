@@ -2269,12 +2269,7 @@ class GeminiProvider(ProviderAdapter):
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
 
-        # Mark the start of the new session logs (for debug_dump tracking)
-        engine_log_path = os.path.join(self._e._data_dir, "engine.log")
-        if os.path.exists(engine_log_path):
-            self._e._engine_log_last_pos = os.path.getsize(engine_log_path)
-        else:
-            self._e._engine_log_last_pos = 0
+
 
         # 1. Smarter Navigation for Gems
         current_target = target_url
@@ -2634,18 +2629,4 @@ class GeminiProvider(ProviderAdapter):
             self._e.automation_status["current_account_id"] = None
             return {"logged_in": False, "account_id": None, "status": "unknown"}
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # test_connection
-    # ──────────────────────────────────────────────────────────────────────────
-    async def test_connection(self):
-        """Simple test to verify Playwright installation and Gemini connectivity."""
-        try:
-            await self._e.start()
-            status = await self._e.navigate("https://www.google.com")
-            print(f"Connection Test: Google returned {status}")
-            await self._e.get_screenshot("browser_screen_capture/test_google.png")
-            await self._e.stop()
-            return True
-        except Exception as e:
-            print(f"Connection Test Failed: {e}")
-            return False
+

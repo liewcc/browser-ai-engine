@@ -64,5 +64,4 @@ class ProviderAdapter(ABC):
     @abstractmethod
     async def get_account_info(self): ...
 
-    @abstractmethod
-    async def test_connection(self): ...
+

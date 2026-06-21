@@ -48,10 +48,7 @@ class EngineClient:
             resp = await client.post(f"{self.base_url}/browser/navigate", json={"url": url}, timeout=60.0)
             return resp.json()
 
-    async def get_snapshot(self):
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{self.base_url}/browser/snapshot", timeout=30.0)
-            return resp.json()
+
 
     async def get_account_info(self):
         async with httpx.AsyncClient() as client:

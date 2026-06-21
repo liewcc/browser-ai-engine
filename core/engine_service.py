@@ -260,15 +260,7 @@ async def navigate(req: NavigateRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/browser/snapshot")
-async def get_snapshot():
-    if not engine.is_running:
-        raise HTTPException(status_code=400, detail="Engine not running")
-    try:
-        path = await engine.get_screenshot()
-        return {"screenshot_path": path}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/browser/capture_dom")
 async def capture_dom():
@@ -1645,7 +1637,6 @@ async def submit_response(req: PromptRequest | None = None):
             engine._stop_automation_event.clear()
         text = req.text if req else None
         result = await engine.submit_response(text=text)
-        await engine.debug_dump("submit")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1811,7 +1802,6 @@ async def redo_response():
         if not engine.automation_status.get("is_running"):
             engine._stop_automation_event.clear()
         result = await engine.redo_response()
-        await engine.debug_dump("redo")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1832,7 +1822,6 @@ async def new_chat():
             except: pass
             
         result = await engine.new_chat(target_url=target_url)
-        await engine.debug_dump("new chat")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
