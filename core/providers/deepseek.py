@@ -66,9 +66,28 @@ class DeepSeekProvider(ProviderAdapter):
         login_state = await self._check_login()
         if login_state.get("logged_in"):
             self._log(f"DeepSeek: Logged in as '{login_state.get('username', 'unknown')}'.")
+            return {"status": "success"}
         else:
-            self._log("DeepSeek: Chat ready (account info not visible).")
-        return {"status": "success"}
+            if getattr(self._e, 'last_headless', True):
+                self._log("DeepSeek: Switching to headed browser for user interaction.")
+                profile = getattr(self._e, '_last_profile_name', 'Default')
+                await self._e.stop()
+                await self._e.start(headless=False, url=url, profile_name=profile)
+                await self._e.navigate(url)
+                try:
+                    cdp = await self._page.context.new_cdp_session(self._page)
+                    win_id = (await cdp.send("Browser.getWindowForTarget"))["windowId"]
+                    await cdp.send("Browser.setWindowBounds", {
+                        "windowId": win_id,
+                        "bounds": {"windowState": "normal"}
+                    })
+                    await cdp.detach()
+                except Exception as e:
+                    self._log(f"DeepSeek: Could not restore window (non-fatal): {e}")
+            return {
+                "status": "login_required",
+                "message": "DeepSeek login required. Please log in using the browser window, then call new_chat() again."
+            }
 
     async def send_chat(self, prompt: str, **kwargs) -> dict:
         """Type prompt, submit, wait for response to finish, and extract reply."""
@@ -81,6 +100,11 @@ class DeepSeekProvider(ProviderAdapter):
             nav_result = await self.new_chat()
             if nav_result.get("status") == "login_required":
                 return nav_result
+
+        if not new_conversation:
+            login_state = await self._check_login()
+            if not login_state.get("logged_in"):
+                return {"status": "login_required", "message": "DeepSeek session expired or not logged in. Please call new_chat() first."}
 
         # Target input
         input_selector = "textarea[placeholder='Message DeepSeek']"
@@ -169,17 +193,33 @@ class DeepSeekProvider(ProviderAdapter):
         try:
             result = await self._page.evaluate("""
                 () => {
+                    const loginForm = document.querySelector('div.ds-sign-in-form-wrapper');
+                    if (loginForm) {
+                        return { logged_in: false, reason: "login_form" };
+                    }
+
                     const avatar = document.querySelector('img[src*="user-avatar"]');
-                    if (!avatar) return { logged_in: false };
-                    // Walk up to find sibling text element (username)
-                    const wrapper = avatar.closest('div');
-                    const nameEl = wrapper
-                        ? wrapper.parentElement
-                            ? wrapper.parentElement.querySelector('div:not(:has(img))')
-                            : null
-                        : null;
-                    const username = nameEl ? nameEl.textContent.trim() : null;
-                    return { logged_in: true, username: username || 'unknown' };
+                    if (avatar) {
+                        const wrapper = avatar.closest('div');
+                        const nameEl = wrapper
+                            ? wrapper.parentElement
+                                ? wrapper.parentElement.querySelector('div:not(:has(img))')
+                                : null
+                            : null;
+                        const username = nameEl ? nameEl.textContent.trim() : null;
+                        return { logged_in: true, username: username || 'unknown' };
+                    }
+
+                    const hasTextarea = !!document.querySelector('textarea');
+                    const hasLoginBtn = Array.from(document.querySelectorAll('[role="button"]')).some(btn => {
+                        const text = btn.innerText || btn.textContent || "";
+                        return text.includes("Log in");
+                    });
+                    if (hasTextarea && hasLoginBtn) {
+                        return { logged_in: false, reason: "guest_chat" };
+                    }
+
+                    return { logged_in: false, reason: "unknown" };
                 }
             """)
             return result

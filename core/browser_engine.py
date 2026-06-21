@@ -182,6 +182,7 @@ class BrowserEngine:
         and launches Playwright with a unique temporary user data dir.
         """
         self.last_headless = headless
+        self._last_profile_name = profile_name
         
         if self.is_running:
             return
