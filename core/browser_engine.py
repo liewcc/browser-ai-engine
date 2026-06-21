@@ -302,6 +302,11 @@ class BrowserEngine:
         if not headless:
             await self._force_minimize_window()
         
+        # Register close handler to handle external browser closes (e.g. user manually closes window)
+        async def on_close(ctx):
+            await self.stop()
+        self._context.on("close", on_close)
+        
         self.is_running = True
 
     async def _force_minimize_window(self):
@@ -327,15 +332,22 @@ class BrowserEngine:
         if not self.is_running:
             return
         
-        # Removed manual state save 
-        # await self.save_session_state()
-        
-        if self._context:
-            await self._context.close()
-        if self._playwright:
-            await self._playwright.stop()
-            
+        # Set to False immediately to prevent re-entry during async cleanup
         self.is_running = False
+        
+        # Safely close context and stop playwright if they haven't been torn down yet
+        try:
+            if self._context:
+                await self._context.close()
+        except Exception:
+            pass
+            
+        try:
+            if self._playwright:
+                await self._playwright.stop()
+        except Exception:
+            pass
+            
         self._page = None
         self._context = None
         self._browser = None
