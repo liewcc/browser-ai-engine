@@ -91,6 +91,7 @@ class DownloadRequest(BaseModel):
     save_dir: str
     naming: dict  # {prefix, padding, start}
     meta: dict    # {aspect_ratio, prompt, url, upload_path}
+    service: str | None = None
 
 class ProcessRequest(BaseModel):
     paths: list[str]
@@ -1867,7 +1868,8 @@ async def download_images(req: DownloadRequest):
         raise HTTPException(status_code=400, detail="Engine not running")
     try:
         # Acquisition Only
-        result = await engine.download_images(
+        provider = await select_service(req.service)
+        result = await provider.download_images(
             save_dir=req.save_dir,
             naming_cfg=req.naming,
             extra_meta=req.meta
