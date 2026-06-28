@@ -1,5 +1,5 @@
 {
-  "version": "1.1.4",
-  "date": "2026-06-22",
-  "notes": "Fix: remove keyword refusal detection from send_chat — MCP text responses were false-positived by phrases like 'language model', 'sorry', 'unable to'."
+  "version": "1.2.0",
+  "date": "2026-06-28",
+  "notes": "feat(dual-tab): implement simultaneous Gemini and DeepSeek tabs and route service parameter."
 }
