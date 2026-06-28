@@ -74,15 +74,17 @@ async def _start_engine(port: int) -> subprocess.Popen:
     return proc
 
 
-async def _capture(url: str) -> str:
+async def _capture(url: str, service: str | None = None) -> str:
     import httpx
+    params = {"service": service} if service else {}
     async with httpx.AsyncClient() as c:
-        r = await c.post(f"{url}/browser/capture_dom", timeout=30)
+        r = await c.post(f"{url}/browser/capture_dom", params=params, timeout=30)
     r.raise_for_status()
-    return r.json().get("path", os.path.join(_PROJECT_ROOT, "data", "dom_debug.html"))
+    suffix = f"_{service}" if service else ""
+    return r.json().get("path", os.path.join(_PROJECT_ROOT, "data", f"dom_debug{suffix}.html"))
 
 
-async def main(port: int) -> None:
+async def main(port: int, service: str | None = None) -> None:
     import httpx
 
     url = _engine_url(port)
@@ -90,7 +92,10 @@ async def main(port: int) -> None:
     print("=" * 58)
     print("  DOM Debug  —  human + Claude cooperative inspector")
     print(f"  Engine: {url}")
-    print(f"  Output: {_PROJECT_ROOT}/data/dom_debug.html")
+    _svc_label = service or "active tab"
+    _out_suffix = f"_{service}" if service else ""
+    print(f"  Service: {_svc_label}")
+    print(f"  Output: {_PROJECT_ROOT}/data/dom_debug{_out_suffix}.html")
     print("=" * 58)
     print()
 
@@ -144,7 +149,7 @@ async def main(port: int) -> None:
             await captured.wait()
             captured.clear()
             try:
-                path = await _capture(url)
+                path = await _capture(url, service)
                 count += 1
                 print(f"  ✓  #{count} saved → {path}")
                 print("     Tell Claude to analyze it.\n")
@@ -169,6 +174,7 @@ async def main(port: int) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Interactive DOM debugger for the browser engine.")
-    ap.add_argument("--port", type=int, default=18800, help="Engine service port (default: 18800)")
+    ap.add_argument("--port",    type=int, default=18800, help="Engine service port (default: 18800)")
+    ap.add_argument("--service", type=str, default=None,  help="Service to capture (gemini/deepseek/copilot/chatgpt); default = active tab")
     args = ap.parse_args()
-    asyncio.run(main(args.port))
+    asyncio.run(main(args.port, args.service))

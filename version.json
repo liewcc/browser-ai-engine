@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "date": "2026-06-28",
-  "notes": "feat(dual-tab): implement simultaneous Gemini and DeepSeek tabs and route service parameter."
+  "notes": "feat(multiple-tab): replace BROWSER_ENGINE_DUAL_TAB bool with BROWSER_ENGINE_PREWARM service list; add ensure_page() lazy init; switch_provider no longer requires pre-warmed tabs."
 }

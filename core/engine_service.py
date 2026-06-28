@@ -113,13 +113,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="GemiPersona Engine Service", lifespan=lifespan)
 
 async def select_service(service: str | None = None):
-    """Stateless service selector. Returns the target provider instance."""
+    """Stateless service selector. Lazy-opens the tab if not yet pre-warmed."""
     if service:
         service_name = service.lower().strip()
+        if service_name not in engine._PROVIDER_REGISTRY:
+            raise HTTPException(status_code=400, detail=f"Unknown service '{service_name}'. Available: {list(engine._PROVIDER_REGISTRY.keys())}")
         if service_name != engine._active_service:
-            res = await engine.switch_provider(service_name)
+            res = await engine.switch_provider(service_name)  # switch_provider calls ensure_page internally
             if res.get("status") == "error":
                 raise HTTPException(status_code=400, detail=res.get("message"))
+        else:
+            await engine.ensure_page(service_name)  # no-op if already warm
         return engine._providers[service_name]
     return engine._provider
 
@@ -277,16 +281,26 @@ async def navigate(req: NavigateRequest):
 
 
 @app.post("/browser/capture_dom")
-async def capture_dom():
-    if not engine.is_running or engine._page is None:
+async def capture_dom(service: str | None = Query(None)):
+    if not engine.is_running:
         raise HTTPException(status_code=400, detail="Browser not running")
     try:
-        html = await engine._page.content()
+        if service:
+            svc = service.lower().strip()
+            page = await engine.ensure_page(svc)
+        else:
+            page = engine._page
+        if page is None:
+            raise HTTPException(status_code=400, detail="No active page")
+        html = await page.content()
         from config_utils import get_project_root
-        out_path = os.path.join(get_project_root(), "data", "dom_debug.html")
+        svc_suffix = f"_{service.lower()}" if service else ""
+        out_path = os.path.join(get_project_root(), "data", f"dom_debug{svc_suffix}.html")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(html)
         return {"path": out_path}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

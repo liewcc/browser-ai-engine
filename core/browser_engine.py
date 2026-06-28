@@ -4,11 +4,14 @@ import sys
 import time
 import json
 import traceback
+import subprocess
+import socket
 from config_utils import load_config, save_config
 from playwright.async_api import async_playwright
 from datetime import datetime
 from providers.gemini import GeminiProvider
 from providers.deepseek import DeepSeekProvider
+from providers.copilot import CopilotProvider
 
 
 # Fix for Windows asyncio NotImplementedError with subprocesses
@@ -19,6 +22,7 @@ class BrowserEngine:
     _PROVIDER_REGISTRY = {
         "gemini": GeminiProvider,
         "deepseek": DeepSeekProvider,
+        "copilot": CopilotProvider,
     }
 
     def __init__(self):
@@ -27,6 +31,7 @@ class BrowserEngine:
         self._context = None
         self._page = None
         self.is_running = False
+        self._chrome_proc = None
         # Data dir: where browser_user_data/, logs, and state files live.
         # Defaults to the directory of this file; override with BROWSER_ENGINE_DATA_DIR
         # so code and data can live in separate locations (e.g. when code is a git submodule).
@@ -68,20 +73,20 @@ class BrowserEngine:
         self._reg_context = None
         # Last image src seen before submit (used by submit_response for change detection)
         self._last_seen_src = None
-        # Initialize providers
-        self._providers = {
-            "gemini": GeminiProvider(self),
-            "deepseek": DeepSeekProvider(self)
-        }
+        # Initialize providers dynamically from registry — adding a new service only requires
+        # registering it in _PROVIDER_REGISTRY; no changes needed here.
+        self._providers = {name: cls(self) for name, cls in self._PROVIDER_REGISTRY.items()}
         self._active_service = "gemini"
         self._provider = self._providers["gemini"]
         
-        # Dual-tab support
-        self._pages = {
-            "gemini": None,
-            "deepseek": None
-        }
-        self._dual_tab = os.environ.get("BROWSER_ENGINE_DUAL_TAB", "").lower() == "true"
+        # Multiple-tab support: _pages tracks one Page per service; None = not yet opened
+        self._pages = {name: None for name in self._PROVIDER_REGISTRY}
+        _raw = os.environ.get("BROWSER_ENGINE_PREWARM", "gemini,deepseek")
+        _requested = {s.strip().lower() for s in _raw.split(",") if s.strip()}
+        # gemini is always pre-warmed (it's the landing tab / _active_service default)
+        _requested.add("gemini")
+        # cap at 2 (defensive; TUI already enforces this)
+        self._prewarm: set[str] = set(list(_requested)[:2]) | {"gemini"}
 
 
 
@@ -270,86 +275,162 @@ class BrowserEngine:
         # 3. Launch Playwright
         self._playwright = await async_playwright().start()
         
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        
+        # Use installed Google Chrome when available — its fingerprint passes bot detection
+        # (e.g. Microsoft Copilot) that Playwright's bundled Chromium fails.
+        # Set BROWSER_ENGINE_CHANNEL=chromium to force bundled Chromium instead.
+        _channel = os.environ.get("BROWSER_ENGINE_CHANNEL", "chrome") or None
+
+        # Let real Chrome report its own UA; only override for bundled Chromium.
+        user_agent = None if _channel == "chrome" else (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+
         target_viewport = {'width': 2560, 'height': 1440} if headless else None
-        
+
         launch_args = [
             "--start-minimized",
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
             "--safebrowsing-disable-download-protection"
         ]
-        
+
         # Use our sandbox as the persistent context root
         launch_dir = self._sandbox_dir if profile_name else source_user_data
         self._user_data_dir = launch_dir  # Stored so download_images() can locate Chrome's download dir
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=launch_dir,
-            headless=headless,
-            user_agent=user_agent,
-            viewport=target_viewport,
-            ignore_default_args=["--enable-automation", "--use-mock-keychain"],
-            args=launch_args,
-            ignore_https_errors=True,
-            java_script_enabled=True,
-            device_scale_factor=1,
-            accept_downloads=True,
-            bypass_csp=True
-        )
+
+        chrome_exe = None
+        if _channel == "chrome":
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            paths_to_check = [
+                os.path.join(local_app_data, "Google", "Chrome", "Application", "chrome.exe"),
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+            ]
+            for p in paths_to_check:
+                if os.path.exists(p):
+                    chrome_exe = p
+                    break
+        
+        self._context = None
+        
+        if chrome_exe and _channel == "chrome":
+            try:
+                # Minimal flags — no --no-sandbox or automation-associated args that
+                # Microsoft's bot detection recognises as CDP/automation signatures.
+                cmd = [
+                    chrome_exe,
+                    "--remote-debugging-port=9222",
+                    f"--user-data-dir={launch_dir}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-blink-features=AutomationControlled",
+                ]
+                if headless:
+                    cmd.append("--headless=new")
+                
+                self._chrome_proc = subprocess.Popen(cmd)
+                
+                port_ready = False
+                for _ in range(20):
+                    try:
+                        with socket.create_connection(("127.0.0.1", 9222), timeout=0.5):
+                            port_ready = True
+                            break
+                    except OSError:
+                        await asyncio.sleep(0.5)
+                
+                if not port_ready:
+                    raise Exception("Timeout waiting for Chrome CDP port 9222")
+                
+                self._browser = await self._playwright.chromium.connect_over_cdp("http://localhost:9222")
+                if self._browser.contexts:
+                    self._context = self._browser.contexts[0]
+                else:
+                    self._context = await self._browser.new_context()
+            except Exception as e:
+                self._log_debug(f"Failed to connect to Chrome over CDP: {e}")
+                if hasattr(self, '_chrome_proc') and self._chrome_proc:
+                    try:
+                        self._chrome_proc.terminate()
+                    except:
+                        pass
+                    self._chrome_proc = None
+                self._context = None
+        
+        if not self._context:
+            launch_kwargs = dict(
+                user_data_dir=launch_dir,
+                headless=headless,
+                viewport=target_viewport,
+                ignore_default_args=["--enable-automation", "--use-mock-keychain"],
+                args=launch_args,
+                ignore_https_errors=True,
+                java_script_enabled=True,
+                device_scale_factor=1,
+                accept_downloads=True,
+                bypass_csp=True,
+            )
+            if user_agent:
+                launch_kwargs["user_agent"] = user_agent
+            if _channel:
+                launch_kwargs["channel"] = _channel
+    
+            try:
+                self._context = await self._playwright.chromium.launch_persistent_context(**launch_kwargs)
+            except Exception:
+                # Fallback: bundled Chromium if real Chrome is not installed
+                self._log_debug("Real Chrome not found, falling back to bundled Chromium.")
+                launch_kwargs.pop("channel", None)
+                launch_kwargs["user_agent"] = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                )
+                self._context = await self._playwright.chromium.launch_persistent_context(**launch_kwargs)
         
         # Removed manual state injection - Playwright Persistent Context 
         # handles this more reliably via the profile folder itself.
         # if headless:
         #    await self.inject_session_state()
 
-        if self._dual_tab:
-            # Create two pages/tabs concurrently
-            self._pages["gemini"] = await self._context.new_page()
-            await self.apply_hardcore_stealth(self._pages["gemini"])
-            
-            self._pages["deepseek"] = await self._context.new_page()
-            await self.apply_hardcore_stealth(self._pages["deepseek"])
-            
-            # Explicitly bind the providers to their own tabs
-            self._providers["gemini"]._page = self._pages["gemini"]
-            self._providers["deepseek"]._page = self._pages["deepseek"]
-            
+        if len(self._prewarm) > 1:
+            # Multiple-tab mode: create one page per pre-warm service concurrently.
+            # gemini is always included (guaranteed in __init__); others depend on TUI selection.
+            prewarm_list = list(self._prewarm)
+            for name in prewarm_list:
+                self._pages[name] = await self._context.new_page()
+                await self.apply_hardcore_stealth(self._pages[name])
+                self._providers[name]._page = self._pages[name]
+
             # Set default active page & provider to Gemini
             self._page = self._pages["gemini"]
             self._provider = self._providers["gemini"]
             self._active_service = "gemini"
-            
-            # Concurrent pre-warming: Gemini must succeed, DeepSeek is non-fatal
-            self._log_debug("Eager dual-tab init: pre-warming Gemini and DeepSeek tabs concurrently...")
-            
-            async def init_gemini():
+
+            self._log_debug(f"Multiple-tab init: pre-warming {prewarm_list} concurrently...")
+
+            async def _warm(name: str, critical: bool):
                 try:
-                    await self._pages["gemini"].goto(self._providers["gemini"].BASE_URL, wait_until="domcontentloaded", timeout=45000)
-                    await self._providers["gemini"].dismiss_agreement_popups()
-                    self._log_debug("Gemini tab pre-warmed successfully.")
+                    await self._pages[name].goto(self._providers[name].BASE_URL, wait_until="domcontentloaded", timeout=45000)
+                    await self._providers[name].dismiss_agreement_popups()
+                    self._log_debug(f"{name} tab pre-warmed successfully.")
                     return True
                 except Exception as e:
-                    self._log_debug(f"Critical error pre-warming Gemini tab: {e}")
-                    raise
-                    
-            async def init_deepseek():
-                try:
-                    await self._pages["deepseek"].goto(self._providers["deepseek"].BASE_URL, wait_until="domcontentloaded", timeout=45000)
-                    await self._providers["deepseek"].dismiss_agreement_popups()
-                    self._log_debug("DeepSeek tab pre-warmed successfully.")
-                    return True
-                except Exception as e:
-                    self._log_debug(f"Non-critical warning pre-warming DeepSeek tab: {e}")
+                    if critical:
+                        self._log_debug(f"Critical error pre-warming {name} tab: {e}")
+                        raise
+                    self._log_debug(f"Non-critical warning pre-warming {name} tab: {e}")
                     return False
-            
-            results = await asyncio.gather(init_gemini(), init_deepseek(), return_exceptions=True)
-            if isinstance(results[0], Exception):
-                raise results[0]
+
+            tasks = [_warm(n, n == "gemini") for n in prewarm_list]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for name, res in zip(prewarm_list, results):
+                if name == "gemini" and isinstance(res, Exception):
+                    raise res
         else:
-            self._page = await self._context.new_page()
-            await self.apply_hardcore_stealth(self._page)
-            # In single-tab mode, ensure active provider uses it
+            # Single-tab mode (only gemini pre-warmed)
+            self._pages["gemini"] = await self._context.new_page()
+            await self.apply_hardcore_stealth(self._pages["gemini"])
+            self._page = self._pages["gemini"]
             self._provider._page = self._page
             
         # Force minimize for non-headless mode.
@@ -405,16 +486,20 @@ class BrowserEngine:
             pass
             
         self._page = None
-        self._pages = {
-            "gemini": None,
-            "deepseek": None
-        }
+        self._pages = {name: None for name in self._PROVIDER_REGISTRY}
         for name in self._providers:
             self._providers[name]._page = None
         self._context = None
         self._browser = None
         self._playwright = None
         
+        if hasattr(self, '_chrome_proc') and self._chrome_proc:
+            try:
+                self._chrome_proc.terminate()
+            except Exception:
+                pass
+            self._chrome_proc = None
+            
         # Final cleanup
         await self._cleanup_sandbox()
 
@@ -714,6 +799,37 @@ class BrowserEngine:
     async def new_chat(self, target_url: str = None):
         return await self._provider.new_chat(target_url)
 
+    async def ensure_page(self, name: str):
+        """Return the Page for *name*, opening and warming it lazily if not yet created.
+
+        Before opening a new tab, check if any context page is already on the service's
+        domain — reuses it so a manually-opened/logged-in tab is not abandoned.
+        """
+        if self._pages.get(name) and not self._pages[name].is_closed():
+            return self._pages[name]
+
+        # Reuse any existing tab already on the service's domain (e.g. user logged in manually)
+        from urllib.parse import urlparse
+        base_domain = urlparse(self._providers[name].BASE_URL).netloc
+        for existing in self._context.pages:
+            if not existing.is_closed() and base_domain in existing.url:
+                self._providers[name]._page = existing
+                self._pages[name] = existing
+                self._log_debug(f"ensure_page: reusing existing tab on {base_domain} for {name}")
+                return existing
+
+        page = await self._context.new_page()
+        await self.apply_hardcore_stealth(page)
+        self._providers[name]._page = page
+        self._pages[name] = page
+        try:
+            await page.goto(self._providers[name].BASE_URL, wait_until="domcontentloaded", timeout=45000)
+            await self._providers[name].dismiss_agreement_popups()
+            self._log_debug(f"ensure_page: {name} tab opened lazily.")
+        except Exception as e:
+            self._log_debug(f"ensure_page({name}) warm-up warning: {e}")
+        return page
+
     async def switch_provider(self, service_name: str) -> dict:
         """Switch the active provider."""
         name = service_name.lower().strip()
@@ -723,38 +839,27 @@ class BrowserEngine:
             return {"status": "error", "message": f"Unknown service '{name}'. Available: {available}"}
         
         if name == self._active_service:
-            if self._dual_tab and self._page:
+            if self._page:
                 try:
                     await self._page.bring_to_front()
                 except Exception:
                     pass
             return {"status": "success", "message": f"Already using {name}"}
-        
-        if self._dual_tab:
-            target_page = self._pages.get(name)
-            if not target_page or target_page.is_closed():
-                return {"status": "error", "message": f"Page for service '{name}' is not open/ready."}
-            
-            self._page = target_page
-            self._provider = self._providers[name]
-            self._active_service = name
-            
-            try:
-                await self._page.bring_to_front()
-            except Exception as e:
-                self._log_debug(f"switch_provider (dual-tab): bring_to_front warning: {e}")
-                
-            return {"status": "success", "message": f"Switched active tab to {name}"}
-        else:
-            new_provider = cls(self)
-            try:
-                if self._page and not self._page.is_closed():
-                    await self._page.goto(cls.BASE_URL, wait_until="domcontentloaded", timeout=15000)
-            except Exception as e:
-                self._log_debug(f"switch_provider: navigation warning: {e}")
-            self._provider = new_provider
-            self._active_service = name
-            return {"status": "success", "message": f"Switched to {name}"}
+
+        # Ensure the target tab exists (lazy-opens if not pre-warmed)
+        await self.ensure_page(name)
+        target_page = self._pages[name]
+
+        self._page = target_page
+        self._provider = self._providers[name]
+        self._active_service = name
+
+        try:
+            await self._page.bring_to_front()
+        except Exception as e:
+            self._log_debug(f"switch_provider (multiple-tab): bring_to_front warning: {e}")
+
+        return {"status": "success", "message": f"Switched active tab to {name}"}
 
 
     async def delete_activity_history(self, range_name: str = "Last hour"):
