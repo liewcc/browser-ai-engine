@@ -257,6 +257,8 @@ class BrowserEngine:
                             if "profile" in state:
                                 state["profile"]["last_used"] = "Default"
                                 state["profile"]["last_active_profiles"] = ["Default"]
+                                state["profile"]["show_picker_on_startup"] = False
+                                state["profile"]["picker_shown"] = False
                             with open(dest, "w", encoding="utf-8") as f:
                                 json.dump(state, f)
                             pass  # Local State patched
@@ -271,6 +273,37 @@ class BrowserEngine:
                 pass  # 'Last Profile' file created
             except Exception as e:
                 print(f"[ERROR] Failed to create 'Last Profile': {e}")
+
+            # Disable Chrome session restore to prevent orphan tabs on CDP restart.
+            # Chrome uses two mechanisms: Preferences setting and binary Sessions/ files.
+            # Both must be cleared so Chrome opens a blank new tab, not stale pages.
+            try:
+                import shutil as _shutil
+                sessions_dir = os.path.join(sandbox_default, "Sessions")
+                if os.path.exists(sessions_dir):
+                    for _f in os.listdir(sessions_dir):
+                        try:
+                            os.remove(os.path.join(sessions_dir, _f))
+                        except Exception:
+                            pass
+
+                sandbox_prefs_path = os.path.join(sandbox_default, "Preferences")
+                if os.path.exists(sandbox_prefs_path):
+                    import json as _json
+                    with open(sandbox_prefs_path, "r", encoding="utf-8") as _fp:
+                        prefs = _json.load(_fp)
+                    if "session" not in prefs:
+                        prefs["session"] = {}
+                    prefs["session"]["restore_on_startup"] = 5  # 5 = Open New Tab page
+                    prefs["session"].pop("urls_to_restore_on_startup", None)
+                    if "profile" not in prefs:
+                        prefs["profile"] = {}
+                    prefs["profile"]["exit_type"] = "Normal"
+                    prefs["profile"]["exited_cleanly"] = True
+                    with open(sandbox_prefs_path, "w", encoding="utf-8") as _fp:
+                        _json.dump(prefs, _fp)
+            except Exception as e:
+                self._log_debug(f"Warning: could not patch Preferences for session restore: {e}")
 
         # 3. Launch Playwright
         self._playwright = await async_playwright().start()
@@ -292,7 +325,8 @@ class BrowserEngine:
             "--start-minimized",
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
-            "--safebrowsing-disable-download-protection"
+            "--safebrowsing-disable-download-protection",
+            "--test-type"
         ]
 
         # Use our sandbox as the persistent context root
@@ -324,6 +358,7 @@ class BrowserEngine:
                     "--no-first-run",
                     "--no-default-browser-check",
                     "--disable-blink-features=AutomationControlled",
+                    "--test-type",
                 ]
                 if headless:
                     cmd.append("--headless=new")
@@ -387,10 +422,21 @@ class BrowserEngine:
                 )
                 self._context = await self._playwright.chromium.launch_persistent_context(**launch_kwargs)
         
-        # Removed manual state injection - Playwright Persistent Context 
+        # Removed manual state injection - Playwright Persistent Context
         # handles this more reliably via the profile folder itself.
         # if headless:
         #    await self.inject_session_state()
+
+        # Close any pages Chrome already has open (from session restore or new-tab defaults).
+        # When connecting over CDP, Chrome may restore stale tabs (e.g. myactivity.google.com).
+        # These orphan tabs cause the user to see the wrong landing page.
+        # Only applies to the CDP path — launch_persistent_context starts with no pages.
+        if hasattr(self, '_chrome_proc') and self._chrome_proc:
+            try:
+                for existing_page in list(self._context.pages):
+                    await existing_page.close()
+            except Exception:
+                pass
 
         if len(self._prewarm) > 1:
             # Multiple-tab mode: create one page per pre-warm service concurrently.
@@ -432,7 +478,15 @@ class BrowserEngine:
             await self.apply_hardcore_stealth(self._pages["gemini"])
             self._page = self._pages["gemini"]
             self._provider._page = self._page
-            
+            # Navigate to starting URL — mirrors _warm() in multi-tab mode.
+            # Without this the tab stays on about:blank and the user never sees Gemini.
+            try:
+                await self._page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await self._provider.dismiss_agreement_popups()
+                self._log_debug(f"Single-tab init: navigated to {url}")
+            except Exception as e:
+                self._log_debug(f"Warning: initial navigation to {url} failed: {e}")
+
         # Force minimize for non-headless mode.
         # --start-minimized gets overridden by Playwright's new_page(), so we
         # re-minimize via CDP to keep the headed fallback window invisible.

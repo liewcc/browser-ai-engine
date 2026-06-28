@@ -1,5 +1,5 @@
 {
-  "version": "1.3.1",
+  "version": "1.3.2",
   "date": "2026-06-28",
-  "notes": "fix(copilot): remove broken _check_login() post-input check that caused false login_required and engine restarts; input visible = logged in."
+  "notes": "fix: clear Chrome session restore (Sessions/ + Preferences) on sandbox prep; close CDP orphan tabs on connect; navigate single-tab mode to starting URL."
 }
