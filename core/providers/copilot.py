@@ -118,22 +118,10 @@ class CopilotProvider(ProviderAdapter):
         except Exception:
             pass  # Not fatal — page may already be on a fresh chat
 
-        # Verify login
-        login_state = await self._check_login()
-        if login_state.get("logged_in"):
-            self._log(f"Copilot: Logged in (account: {login_state.get('account_id', 'unknown')}).")
-            return {"status": "success"}
-        else:
-            if getattr(self._e, 'last_headless', True):
-                self._log("Copilot: Not logged in — switching to headed for user login.")
-                await self._relaunch_headed()
-            return {
-                "status": "login_required",
-                "message": (
-                    "Copilot login required. Please sign in with your Microsoft account "
-                    "in the browser window, then call new_chat() again."
-                )
-            }
+        # If the input box is visible the user is on the chat page → logged in.
+        # No separate avatar check needed; _check_login() selector is unreliable.
+        self._log("Copilot: Chat ready.")
+        return {"status": "success"}
 
     async def send_chat(self, prompt: str, **kwargs) -> dict:
         """Type prompt, submit, wait for response to stabilize, return text."""
